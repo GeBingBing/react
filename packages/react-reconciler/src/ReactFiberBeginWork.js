@@ -27,8 +27,8 @@ import type {
   OffscreenState,
   OffscreenQueue,
   OffscreenInstance,
-} from './ReactFiberOffscreenComponent';
-import {OffscreenDetached} from './ReactFiberOffscreenComponent';
+} from './ReactFiberActivityComponent';
+import {OffscreenDetached} from './ReactFiberActivityComponent';
 import type {
   Cache,
   CacheComponentState,
@@ -90,6 +90,7 @@ import {
   ShouldCapture,
   ForceClientRender,
   Passive,
+  DidDefer,
 } from './ReactFiberFlags';
 import ReactSharedInternals from 'shared/ReactSharedInternals';
 import {
@@ -106,9 +107,9 @@ import {
   enableLegacyHidden,
   enableCPUSuspense,
   enableFloat,
-  enableHostSingletons,
   enableFormActions,
   enableAsyncActions,
+  enablePostpone,
 } from 'shared/ReactFeatureFlags';
 import isArray from 'shared/isArray';
 import shallowEqual from 'shared/shallowEqual';
@@ -257,6 +258,7 @@ import {
   renderDidSuspendDelayIfPossible,
   markSkippedUpdateLanes,
   getWorkInProgressRoot,
+  peekDeferredLane,
 } from './ReactFiberWorkLoop';
 import {enqueueConcurrentRenderForLane} from './ReactFiberConcurrentUpdates';
 import {pushCacheProvider, CacheContext} from './ReactFiberCacheComponent';
@@ -530,6 +532,7 @@ function updateMemoComponent(
       Component.type,
       null,
       nextProps,
+      null,
       workInProgress,
       workInProgress.mode,
       renderLanes,
@@ -2227,9 +2230,22 @@ function shouldRemainOnFallback(
   );
 }
 
-function getRemainingWorkInPrimaryTree(current: Fiber, renderLanes: Lanes) {
-  // TODO: Should not remove render lanes that were pinged during this render
-  return removeLanes(current.childLanes, renderLanes);
+function getRemainingWorkInPrimaryTree(
+  current: Fiber | null,
+  primaryTreeDidDefer: boolean,
+  renderLanes: Lanes,
+) {
+  let remainingLanes =
+    current !== null ? removeLanes(current.childLanes, renderLanes) : NoLanes;
+  if (primaryTreeDidDefer) {
+    // A useDeferredValue hook spawned a deferred task inside the primary tree.
+    // Ensure that we retry this component at the deferred priority.
+    // TODO: We could make this a per-subtree value instead of a global one.
+    // Would need to track it on the context stack somehow, similar to what
+    // we'd have to do for resumable contexts.
+    remainingLanes = mergeLanes(remainingLanes, peekDeferredLane());
+  }
+  return remainingLanes;
 }
 
 function updateSuspenseComponent(
@@ -2257,6 +2273,11 @@ function updateSuspenseComponent(
     showFallback = true;
     workInProgress.flags &= ~DidCapture;
   }
+
+  // Check if the primary children spawned a deferred task (useDeferredValue)
+  // during the first pass.
+  const didPrimaryChildrenDefer = (workInProgress.flags & DidDefer) !== NoFlags;
+  workInProgress.flags &= ~DidDefer;
 
   // OK, the next part is confusing. We're about to reconcile the Suspense
   // boundary's children. This involves some custom reconciliation logic. Two
@@ -2328,6 +2349,11 @@ function updateSuspenseComponent(
       const primaryChildFragment: Fiber = (workInProgress.child: any);
       primaryChildFragment.memoizedState =
         mountSuspenseOffscreenState(renderLanes);
+      primaryChildFragment.childLanes = getRemainingWorkInPrimaryTree(
+        current,
+        didPrimaryChildrenDefer,
+        renderLanes,
+      );
       workInProgress.memoizedState = SUSPENDED_MARKER;
       if (enableTransitionTracing) {
         const currentTransitions = getPendingTransitions();
@@ -2367,6 +2393,11 @@ function updateSuspenseComponent(
       const primaryChildFragment: Fiber = (workInProgress.child: any);
       primaryChildFragment.memoizedState =
         mountSuspenseOffscreenState(renderLanes);
+      primaryChildFragment.childLanes = getRemainingWorkInPrimaryTree(
+        current,
+        didPrimaryChildrenDefer,
+        renderLanes,
+      );
       workInProgress.memoizedState = SUSPENDED_MARKER;
 
       // TODO: Transition Tracing is not yet implemented for CPU Suspense.
@@ -2401,6 +2432,7 @@ function updateSuspenseComponent(
           current,
           workInProgress,
           didSuspend,
+          didPrimaryChildrenDefer,
           nextProps,
           dehydrated,
           prevState,
@@ -2463,6 +2495,7 @@ function updateSuspenseComponent(
       }
       primaryChildFragment.childLanes = getRemainingWorkInPrimaryTree(
         current,
+        didPrimaryChildrenDefer,
         renderLanes,
       );
       workInProgress.memoizedState = SUSPENDED_MARKER;
@@ -2833,6 +2866,7 @@ function updateDehydratedSuspenseComponent(
   current: Fiber,
   workInProgress: Fiber,
   didSuspend: boolean,
+  didPrimaryChildrenDefer: boolean,
   nextProps: any,
   suspenseInstance: SuspenseInstance,
   suspenseState: SuspenseState,
@@ -2859,7 +2893,8 @@ function updateDehydratedSuspenseComponent(
       // This boundary is in a permanent fallback state. In this case, we'll never
       // get an update and we'll never be able to hydrate the final content. Let's just try the
       // client side render instead.
-      let digest, message, stack;
+      let digest: ?string;
+      let message, stack;
       if (__DEV__) {
         ({digest, message, stack} =
           getSuspenseInstanceFallbackErrorDetails(suspenseInstance));
@@ -2867,19 +2902,23 @@ function updateDehydratedSuspenseComponent(
         ({digest} = getSuspenseInstanceFallbackErrorDetails(suspenseInstance));
       }
 
-      let error;
-      if (message) {
-        // eslint-disable-next-line react-internal/prod-error-codes
-        error = new Error(message);
-      } else {
-        error = new Error(
-          'The server could not finish this Suspense boundary, likely ' +
-            'due to an error during server rendering. Switched to ' +
-            'client rendering.',
-        );
+      let capturedValue = null;
+      // TODO: Figure out a better signal than encoding a magic digest value.
+      if (!enablePostpone || digest !== 'POSTPONE') {
+        let error;
+        if (message) {
+          // eslint-disable-next-line react-internal/prod-error-codes
+          error = new Error(message);
+        } else {
+          error = new Error(
+            'The server could not finish this Suspense boundary, likely ' +
+              'due to an error during server rendering. Switched to ' +
+              'client rendering.',
+          );
+        }
+        (error: any).digest = digest;
+        capturedValue = createCapturedValue<mixed>(error, digest, stack);
       }
-      (error: any).digest = digest;
-      const capturedValue = createCapturedValue<mixed>(error, digest, stack);
       return retrySuspenseComponentWithoutHydrating(
         current,
         workInProgress,
@@ -2952,7 +2991,15 @@ function updateDehydratedSuspenseComponent(
       // TODO: We should ideally have a sync hydration lane that we can apply to do
       // a pass where we hydrate this subtree in place using the previous Context and then
       // reapply the update afterwards.
-      renderDidSuspendDelayIfPossible();
+      if (isSuspenseInstancePending(suspenseInstance)) {
+        // This is a dehydrated suspense instance. We don't need to suspend
+        // because we're already showing a fallback.
+        // TODO: The Fizz runtime might still stream in completed HTML, out-of-
+        // band. Should we fix this? There's a version of this bug that happens
+        // during client rendering, too. Needs more consideration.
+      } else {
+        renderDidSuspendDelayIfPossible();
+      }
       return retrySuspenseComponentWithoutHydrating(
         current,
         workInProgress,
@@ -3049,6 +3096,11 @@ function updateDehydratedSuspenseComponent(
       const primaryChildFragment: Fiber = (workInProgress.child: any);
       primaryChildFragment.memoizedState =
         mountSuspenseOffscreenState(renderLanes);
+      primaryChildFragment.childLanes = getRemainingWorkInPrimaryTree(
+        current,
+        didPrimaryChildrenDefer,
+        renderLanes,
+      );
       workInProgress.memoizedState = SUSPENDED_MARKER;
       return fallbackChildFragment;
     }
@@ -3999,6 +4051,7 @@ function beginWork(
           workInProgress.type,
           workInProgress.key,
           workInProgress.pendingProps,
+          workInProgress._debugSource || null,
           workInProgress._debugOwner || null,
           workInProgress.mode,
           workInProgress.lanes,
@@ -4135,7 +4188,7 @@ function beginWork(
       }
     // Fall through
     case HostSingleton:
-      if (enableHostSingletons && supportsSingletons) {
+      if (supportsSingletons) {
         return updateHostSingleton(current, workInProgress, renderLanes);
       }
     // Fall through

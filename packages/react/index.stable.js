@@ -22,7 +22,6 @@ export {
   createElement,
   createFactory,
   createRef,
-  createServerContext,
   use,
   forwardRef,
   isValidElement,
@@ -42,9 +41,10 @@ export {
   useLayoutEffect,
   useMemo,
   useReducer,
+  useOptimistic,
   useRef,
   useState,
   useSyncExternalStore,
   useTransition,
   version,
-} from './src/React';
+} from './src/ReactClient';

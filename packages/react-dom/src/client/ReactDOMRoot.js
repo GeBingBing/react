@@ -7,7 +7,7 @@
  * @flow
  */
 
-import type {ReactNodeList} from 'shared/ReactTypes';
+import type {ReactNodeList, ReactFormState} from 'shared/ReactTypes';
 import type {
   FiberRoot,
   TransitionTracingCallbacks,
@@ -18,9 +18,10 @@ import {queueExplicitHydrationTarget} from 'react-dom-bindings/src/events/ReactD
 import {REACT_ELEMENT_TYPE} from 'shared/ReactSymbols';
 import {
   enableFloat,
-  enableHostSingletons,
   allowConcurrentByDefault,
   disableCommentsAsDOMContainers,
+  enableAsyncActions,
+  enableFormActions,
 } from 'shared/ReactFeatureFlags';
 
 import ReactDOMSharedInternals from '../ReactDOMSharedInternals';
@@ -34,15 +35,14 @@ export type RootType = {
   render(children: ReactNodeList): void,
   unmount(): void,
   _internalRoot: FiberRoot | null,
-  ...
 };
+
 export type CreateRootOptions = {
   unstable_strictMode?: boolean,
   unstable_concurrentUpdatesByDefault?: boolean,
   unstable_transitionCallbacks?: TransitionTracingCallbacks,
   identifierPrefix?: string,
   onRecoverableError?: (error: mixed) => void,
-  ...
 };
 
 export type HydrateRootOptions = {
@@ -55,7 +55,7 @@ export type HydrateRootOptions = {
   unstable_transitionCallbacks?: TransitionTracingCallbacks,
   identifierPrefix?: string,
   onRecoverableError?: (error: mixed) => void,
-  ...
+  formState?: ReactFormState<any, any> | null,
 };
 
 import {
@@ -75,7 +75,6 @@ import {
   createContainer,
   createHydrationContainer,
   updateContainer,
-  findHostInstanceWithNoPortals,
   flushSync,
   isAlreadyRendering,
 } from 'react-reconciler/src/ReactFiberReconciler';
@@ -123,26 +122,6 @@ ReactDOMHydrationRoot.prototype.render = ReactDOMRoot.prototype.render =
           'You passed a second argument to root.render(...) but it only accepts ' +
             'one argument.',
         );
-      }
-
-      const container = root.containerInfo;
-
-      if (
-        !enableFloat &&
-        !enableHostSingletons &&
-        container.nodeType !== COMMENT_NODE
-      ) {
-        const hostInstance = findHostInstanceWithNoPortals(root.current);
-        if (hostInstance) {
-          if (hostInstance.parentNode !== container) {
-            console.error(
-              'render(...): It looks like the React-rendered content of the ' +
-                'root container was removed without using React. This is not ' +
-                'supported and will cause errors. Instead, call ' +
-                "root.unmount() to empty a root's container.",
-            );
-          }
-        }
       }
     }
     updateContainer(children, root, null, null);
@@ -302,6 +281,7 @@ export function hydrateRoot(
   let identifierPrefix = '';
   let onRecoverableError = defaultOnRecoverableError;
   let transitionCallbacks = null;
+  let formState = null;
   if (options !== null && options !== undefined) {
     if (options.unstable_strictMode === true) {
       isStrictMode = true;
@@ -321,6 +301,11 @@ export function hydrateRoot(
     if (options.unstable_transitionCallbacks !== undefined) {
       transitionCallbacks = options.unstable_transitionCallbacks;
     }
+    if (enableAsyncActions && enableFormActions) {
+      if (options.formState !== undefined) {
+        formState = options.formState;
+      }
+    }
   }
 
   const root = createHydrationContainer(
@@ -334,6 +319,7 @@ export function hydrateRoot(
     identifierPrefix,
     onRecoverableError,
     transitionCallbacks,
+    formState,
   );
   markContainerAsRoot(root.current, container);
   Dispatcher.current = ReactDOMClientDispatcher;
@@ -371,20 +357,6 @@ export function isValidContainerLegacy(node: any): boolean {
 
 function warnIfReactDOMContainerInDEV(container: any) {
   if (__DEV__) {
-    if (
-      !enableHostSingletons &&
-      container.nodeType === ELEMENT_NODE &&
-      ((container: any): Element).tagName &&
-      ((container: any): Element).tagName.toUpperCase() === 'BODY'
-    ) {
-      console.error(
-        'createRoot(): Creating roots directly with document.body is ' +
-          'discouraged, since its children are often manipulated by third-party ' +
-          'scripts and browser extensions. This may lead to subtle ' +
-          'reconciliation issues. Try using a container element created ' +
-          'for your app.',
-      );
-    }
     if (isContainerMarkedAsRoot(container)) {
       if (container._reactRootContainer) {
         console.error(

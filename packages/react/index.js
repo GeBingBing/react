@@ -8,8 +8,6 @@
  */
 
 // Keep in sync with https://github.com/facebook/flow/blob/main/lib/react.js
-export type StatelessFunctionalComponent<P> =
-  React$StatelessFunctionalComponent<P>;
 export type ComponentType<-P> = React$ComponentType<P>;
 export type AbstractComponent<
   -Config,
@@ -40,7 +38,6 @@ export {
   PureComponent,
   StrictMode,
   Suspense,
-  SuspenseList,
   cloneElement,
   createContext,
   createElement,
@@ -57,8 +54,9 @@ export {
   unstable_Cache,
   unstable_DebugTracingMode,
   unstable_LegacyHidden,
-  unstable_Offscreen,
+  unstable_Activity,
   unstable_Scope,
+  unstable_SuspenseList,
   unstable_TracingMarker,
   unstable_getCacheSignal,
   unstable_getCacheForType,
@@ -75,11 +73,11 @@ export {
   useInsertionEffect,
   useLayoutEffect,
   useMemo,
-  experimental_useOptimistic,
+  useOptimistic,
   useSyncExternalStore,
   useReducer,
   useRef,
   useState,
   useTransition,
   version,
-} from './src/React';
+} from './src/ReactClient';
